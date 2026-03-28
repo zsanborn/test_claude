@@ -1,9 +1,7 @@
 """
 Commodities Market Dashboard
-Left chart: top 10 performers (cumulative % return).
-Right chart: daily price change (derivative) for those same top 10.
-Click any point on the left chart to fetch GDELT news headlines for the
-5 days prior and get a Claude-powered summary of the likely driving event.
+Left: top 10 performers (cumulative % return).
+Right: Claude-powered news analysis for any clicked point.
 """
 
 import os
@@ -50,6 +48,16 @@ TIME_WINDOWS = {
     "1 Year": 365,
 }
 
+# --- Style constants ---
+FONT = '"Helvetica Neue", Helvetica, Arial, sans-serif'
+BG = "#F7F4EF"
+CARD_BG = "#FFFFFF"
+BORDER = "#DDD8CC"
+TEXT = "#2C2C2C"
+SUBTEXT = "#888880"
+ACCENT = "#4A5568"
+
+
 # --- Data helpers ---
 
 def fetch_data() -> pd.DataFrame:
@@ -71,13 +79,6 @@ def compute_returns(prices: pd.DataFrame, start_date: datetime) -> pd.DataFrame:
     return (subset / subset.iloc[0] - 1) * 100
 
 
-def compute_daily_changes(prices: pd.DataFrame, start_date: datetime) -> pd.DataFrame:
-    """Day-over-day price change (first difference) as % of previous close."""
-    subset = prices[prices.index >= pd.Timestamp(start_date)].copy()
-    subset = subset.dropna(axis=1, how="all").ffill().bfill()
-    return subset.pct_change() * 100
-
-
 # --- News & AI helpers ---
 
 def fetch_headlines(commodity: str, end_date: datetime, lookback_days: int = 5) -> list[dict]:
@@ -86,8 +87,6 @@ def fetch_headlines(commodity: str, end_date: datetime, lookback_days: int = 5) 
     Returns a list of dicts with 'title', 'domain', and 'date' keys.
     """
     start = end_date - timedelta(days=lookback_days)
-
-    # Pick the broadest timelimit that still covers the clicked date
     days_ago = (datetime.today() - end_date).days
     if days_ago <= 7:
         timelimit = "w"
@@ -150,7 +149,7 @@ def summarize_with_claude(commodity: str, click_date: str, headlines: list[dict]
 
 # --- Chart builder ---
 
-def make_figure(data: pd.DataFrame, title: str, commodities: list[str], y_label: str = "Return (%)", hovermode: str = "x unified") -> go.Figure:
+def make_figure(data: pd.DataFrame, title: str, commodities: list[str]) -> go.Figure:
     fig = go.Figure()
     for name in commodities:
         if name not in data.columns:
@@ -165,15 +164,20 @@ def make_figure(data: pd.DataFrame, title: str, commodities: list[str], y_label:
                 hovertemplate="%{fullData.name}<br>%{x|%b %d, %Y}<br><b>%{y:+.2f}%</b><extra></extra>",
             )
         )
-    fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+    fig.add_hline(y=0, line_dash="dot", line_color="#BBBBBB", opacity=0.8)
     fig.update_layout(
-        title=title,
+        title=dict(text=title, font=dict(family=FONT, size=15, weight=300, color=TEXT)),
         xaxis_title="Date",
-        yaxis_title=y_label,
-        legend=dict(orientation="v", x=1.02, y=1),
-        hovermode=hovermode,
-        template="plotly_dark",
-        margin=dict(l=50, r=180, t=50, b=50),
+        yaxis_title="Return (%)",
+        legend=dict(orientation="v", x=1.02, y=1, font=dict(family=FONT, size=11, color=TEXT)),
+        hovermode="closest",
+        template="plotly_white",
+        font=dict(family=FONT, color=TEXT),
+        paper_bgcolor=CARD_BG,
+        plot_bgcolor=CARD_BG,
+        margin=dict(l=50, r=160, t=50, b=50),
+        xaxis=dict(gridcolor="#EEEBE4", linecolor=BORDER),
+        yaxis=dict(gridcolor="#EEEBE4", linecolor=BORDER),
     )
     return fig
 
@@ -186,61 +190,72 @@ print(f"Loaded {len(ALL_PRICES.columns)} commodities.")
 # --- Dash app ---
 app = Dash(__name__)
 
-_panel_style = {
-    "backgroundColor": "#16213e",
-    "border": "1px solid #2a2a5a",
-    "borderRadius": "8px",
-    "padding": "20px",
-    "marginTop": "20px",
-    "color": "#e0e0e0",
+_card_style = {
+    "backgroundColor": CARD_BG,
+    "border": f"1px solid {BORDER}",
+    "borderRadius": "6px",
+    "padding": "24px",
+    "fontFamily": FONT,
+    "color": TEXT,
+    "height": "100%",
+    "boxSizing": "border-box",
 }
 
+_placeholder = html.Div(
+    style={**_card_style, "display": "flex", "alignItems": "center", "justifyContent": "center", "minHeight": "520px"},
+    children=html.P(
+        "Click any point on the chart to analyze news headlines.",
+        style={"color": SUBTEXT, "fontFamily": FONT, "fontWeight": 400, "fontSize": "14px", "textAlign": "center"},
+    ),
+)
+
 app.layout = html.Div(
-    style={"backgroundColor": "#1a1a2e", "minHeight": "100vh", "padding": "20px", "fontFamily": "sans-serif"},
+    style={"backgroundColor": BG, "minHeight": "100vh", "padding": "32px 40px", "fontFamily": FONT},
     children=[
         html.H1(
             "Commodities Market Dashboard",
-            style={"color": "#e0e0e0", "textAlign": "center", "marginBottom": "4px"},
+            style={"color": TEXT, "textAlign": "center", "fontWeight": 300, "fontSize": "28px", "marginBottom": "6px", "letterSpacing": "-0.5px"},
         ),
         html.P(
-            "Left: top 10 performers (cumulative return). Right: daily price change for those same commodities.",
-            style={"color": "#888", "textAlign": "center", "marginBottom": "20px"},
+            "Top 10 commodity futures performers. Click any point to surface related news and an AI-generated summary.",
+            style={"color": SUBTEXT, "textAlign": "center", "fontWeight": 400, "fontSize": "14px", "marginBottom": "28px"},
         ),
+
+        # Time window selector
         html.Div(
-            style={"display": "flex", "justifyContent": "center", "marginBottom": "24px"},
+            style={"display": "flex", "justifyContent": "center", "alignItems": "center", "marginBottom": "24px", "gap": "12px"},
             children=[
-                html.Label("Time Window: ", style={"color": "#ccc", "marginRight": "12px", "alignSelf": "center"}),
+                html.Label("Time window:", style={"color": SUBTEXT, "fontWeight": 400, "fontSize": "13px"}),
                 dcc.RadioItems(
                     id="time-window",
                     options=[{"label": k, "value": v} for k, v in TIME_WINDOWS.items()],
                     value=30,
                     inline=True,
-                    style={"color": "#ccc"},
-                    inputStyle={"marginRight": "4px", "marginLeft": "16px"},
+                    style={"color": TEXT, "fontSize": "13px"},
+                    inputStyle={"marginRight": "4px", "marginLeft": "14px"},
                 ),
             ],
         ),
+
+        # Chart + News panel side by side
         html.Div(
-            style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "16px"},
+            style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "16px", "alignItems": "start"},
             children=[
-                dcc.Graph(id="top-10", style={"height": "520px"}),
-                dcc.Graph(id="top-10-derivative", style={"height": "520px"}),
+                html.Div(
+                    style={**_card_style, "padding": "8px"},
+                    children=dcc.Graph(id="top-10", style={"height": "520px"}),
+                ),
+                dcc.Loading(
+                    type="circle",
+                    color=ACCENT,
+                    children=html.Div(id="news-panel", children=_placeholder, style={"minHeight": "520px"}),
+                ),
             ],
         ),
+
         html.Div(
             id="last-updated",
-            style={"color": "#555", "textAlign": "center", "marginTop": "12px", "fontSize": "12px"},
-        ),
-
-        # --- News Analysis Panel ---
-        html.P(
-            "Click any point on the left chart to analyze news headlines around that date.",
-            style={"color": "#666", "textAlign": "center", "marginTop": "24px", "fontSize": "13px"},
-        ),
-        dcc.Loading(
-            type="circle",
-            color="#7b8cde",
-            children=html.Div(id="news-panel"),
+            style={"color": SUBTEXT, "textAlign": "center", "marginTop": "16px", "fontSize": "12px", "fontWeight": 400},
         ),
     ],
 )
@@ -250,7 +265,6 @@ app.layout = html.Div(
 
 @app.callback(
     Output("top-10", "figure"),
-    Output("top-10-derivative", "figure"),
     Output("last-updated", "children"),
     Input("time-window", "value"),
 )
@@ -259,21 +273,13 @@ def update_charts(days: int):
     returns = compute_returns(ALL_PRICES, start)
 
     if returns.empty:
-        empty = go.Figure()
-        return empty, empty, "No data available."
+        return go.Figure(), "No data available."
 
     top10 = returns.iloc[-1].sort_values(ascending=False).head(10).index.tolist()
+    fig_top = make_figure(returns, "Top 10 Performers", top10)
 
-    fig_top = make_figure(returns, "Top 10 Performers", top10, hovermode="closest")
-
-    daily = compute_daily_changes(ALL_PRICES, start)
-    fig_deriv = make_figure(daily, "Daily Price Change — Top 10 Performers", top10, y_label="Daily Change (%)")
-    fig_deriv.update_traces(
-        hovertemplate="%{fullData.name}<br>%{x|%b %d, %Y}<br><b>%{y:+.2f}%/day</b><extra></extra>"
-    )
-
-    updated = f"Data as of {datetime.today().strftime('%B %d, %Y')} | {len(returns.columns)} commodities tracked"
-    return fig_top, fig_deriv, updated
+    updated = f"Data as of {datetime.today().strftime('%B %d, %Y')}  ·  {len(returns.columns)} commodities tracked"
+    return fig_top, updated
 
 
 @app.callback(
@@ -289,24 +295,22 @@ def analyze_click(click_data, days):
 
     point = click_data["points"][0]
     commodity = point.get("customdata") or point.get("data", {}).get("name", "Unknown")
-    date_str = point["x"]  # ISO format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS
-    click_date = datetime.fromisoformat(date_str[:10])
+    click_date = datetime.fromisoformat(point["x"][:10])
     display_date = click_date.strftime("%B %d, %Y")
 
     headlines = fetch_headlines(commodity, click_date)
     summary = summarize_with_claude(commodity, display_date, headlines)
 
-    # Rebuild top-10 figure with a selection circle at the clicked point
+    # Rebuild chart with selection circle
     start = datetime.today() - timedelta(days=days)
     returns = compute_returns(ALL_PRICES, start)
     top10 = returns.iloc[-1].sort_values(ascending=False).head(10).index.tolist()
-    fig_top = make_figure(returns, "Top 10 Performers", top10, hovermode="closest")
+    fig_top = make_figure(returns, "Top 10 Performers", top10)
     fig_top.add_trace(go.Scatter(
         x=[click_date],
         y=[point["y"]],
         mode="markers",
-        marker=dict(size=14, color="rgba(0,0,0,0)", line=dict(color="white", width=2.5)),
-        name="Selected",
+        marker=dict(size=14, color="rgba(0,0,0,0)", line=dict(color=TEXT, width=2)),
         showlegend=False,
         hoverinfo="skip",
     ))
@@ -314,28 +318,26 @@ def analyze_click(click_data, days):
     headline_items = [
         html.Li(
             [
-                html.Span(f"[{h['date']}] " if h["date"] else "",
-                          style={"color": "#888", "fontSize": "12px"}),
-                html.Span(h["title"], style={"color": "#c8d0e7"}),
-                html.Span(f"  — {h['domain']}" if h["domain"] else "",
-                          style={"color": "#555", "fontSize": "12px"}),
+                html.Span(f"{h['date']}  ", style={"color": SUBTEXT, "fontSize": "12px", "fontWeight": 400}),
+                html.Span(h["title"], style={"color": TEXT, "fontWeight": 400}),
+                html.Span(f"  — {h['domain']}" if h["domain"] else "", style={"color": SUBTEXT, "fontSize": "12px"}),
             ],
-            style={"marginBottom": "6px"},
+            style={"marginBottom": "8px", "lineHeight": "1.5"},
         )
         for h in headlines
-    ] or [html.Li("No headlines found.", style={"color": "#888"})]
+    ] or [html.Li("No headlines found.", style={"color": SUBTEXT})]
 
     news_panel = html.Div(
-        style=_panel_style,
+        style=_card_style,
         children=[
             html.H3(
-                f"News Analysis: {commodity} around {display_date}",
-                style={"color": "#7b8cde", "marginTop": 0},
+                f"{commodity}  ·  {display_date}",
+                style={"color": TEXT, "fontWeight": 300, "fontSize": "17px", "marginTop": 0, "marginBottom": "20px", "letterSpacing": "-0.3px"},
             ),
-            html.H4("Claude's Summary", style={"color": "#aab4d4", "marginBottom": "8px"}),
-            html.P(summary, style={"color": "#e0e0e0", "lineHeight": "1.6", "marginBottom": "20px"}),
-            html.H4("Top Headlines (5 days prior)", style={"color": "#aab4d4", "marginBottom": "8px"}),
-            html.Ul(headline_items, style={"paddingLeft": "20px", "lineHeight": "1.8"}),
+            html.H4("AI Summary", style={"color": ACCENT, "fontWeight": 300, "fontSize": "13px", "textTransform": "uppercase", "letterSpacing": "1px", "marginBottom": "8px"}),
+            html.P(summary, style={"color": TEXT, "fontWeight": 400, "lineHeight": "1.7", "marginBottom": "24px", "fontSize": "14px"}),
+            html.H4("Headlines (5 days prior)", style={"color": ACCENT, "fontWeight": 300, "fontSize": "13px", "textTransform": "uppercase", "letterSpacing": "1px", "marginBottom": "10px"}),
+            html.Ul(headline_items, style={"paddingLeft": "18px", "fontSize": "13px"}),
         ],
     )
     return news_panel, fig_top
