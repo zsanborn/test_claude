@@ -161,6 +161,7 @@ def make_figure(data: pd.DataFrame, title: str, commodities: list[str], y_label:
                 y=data[name].round(2),
                 mode="lines",
                 name=name,
+                customdata=[name] * len(data),
                 hovertemplate="%{fullData.name}<br>%{x|%b %d, %Y}<br><b>%{y:+.2f}%</b><extra></extra>",
             )
         )
@@ -285,7 +286,7 @@ def analyze_click(click_data):
         return no_update
 
     point = click_data["points"][0]
-    commodity = point["data"]["name"]
+    commodity = point.get("customdata") or point.get("data", {}).get("name", "Unknown")
     date_str = point["x"]  # ISO format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS
     click_date = datetime.fromisoformat(date_str[:10])
     display_date = click_date.strftime("%B %d, %Y")
