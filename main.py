@@ -7,8 +7,8 @@ Click any point on the left chart to fetch GDELT news headlines for the
 """
 
 import os
-import requests
 import anthropic
+from duckduckgo_search import DDGS
 import pandas as pd
 import plotly.graph_objects as go
 import yfinance as yf
@@ -50,9 +50,6 @@ TIME_WINDOWS = {
     "1 Year": 365,
 }
 
-GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
-
-
 # --- Data helpers ---
 
 def fetch_data() -> pd.DataFrame:
@@ -85,33 +82,36 @@ def compute_daily_changes(prices: pd.DataFrame, start_date: datetime) -> pd.Data
 
 def fetch_headlines(commodity: str, end_date: datetime, lookback_days: int = 5) -> list[dict]:
     """
-    Fetch top news headlines from GDELT for a commodity in the N days prior to end_date.
+    Fetch top news headlines via DuckDuckGo for a commodity in the N days prior to end_date.
     Returns a list of dicts with 'title', 'domain', and 'date' keys.
     """
     start = end_date - timedelta(days=lookback_days)
-    params = {
-        "query": f'"{commodity}"',
-        "startdatetime": start.strftime("%Y%m%d%H%M%S"),
-        "enddatetime": end_date.strftime("%Y%m%d%H%M%S"),
-        "mode": "artlist",
-        "format": "json",
-        "maxrecords": 10,
-        "sort": "hybridrel",
-    }
+
+    # Pick the broadest timelimit that still covers the clicked date
+    days_ago = (datetime.today() - end_date).days
+    if days_ago <= 7:
+        timelimit = "w"
+    elif days_ago <= 30:
+        timelimit = "m"
+    else:
+        timelimit = "y"
+
     try:
-        resp = requests.get(GDELT_URL, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        articles = data.get("articles", [])
-        return [
-            {
-                "title": a.get("title", "").strip(),
-                "domain": a.get("domain", ""),
-                "date": a.get("seendate", "")[:8],  # YYYYMMDD
-            }
-            for a in articles
-            if a.get("title")
-        ]
+        results = DDGS().news(
+            keywords=f"{commodity} commodity price",
+            timelimit=timelimit,
+            max_results=50,
+        )
+        headlines = []
+        for r in results:
+            article_date = datetime.fromisoformat(r["date"][:10])
+            if start <= article_date <= end_date:
+                headlines.append({
+                    "title": r.get("title", "").strip(),
+                    "domain": r.get("source", ""),
+                    "date": article_date.strftime("%Y-%m-%d"),
+                })
+        return headlines[:10]
     except Exception as e:
         return [{"title": f"Error fetching news: {e}", "domain": "", "date": ""}]
 
