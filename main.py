@@ -2,12 +2,17 @@
 Commodities Market Dashboard
 Left chart: top 10 performers (cumulative % return).
 Right chart: daily price change (derivative) for those same top 10.
+Click any point on the left chart to fetch GDELT news headlines for the
+5 days prior and get a Claude-powered summary of the likely driving event.
 """
 
+import os
+import requests
+import anthropic
 import pandas as pd
 import plotly.graph_objects as go
 import yfinance as yf
-from dash import Dash, Input, Output, dcc, html
+from dash import Dash, Input, Output, dcc, html, no_update
 from datetime import datetime, timedelta
 
 # --- Commodity futures tickers ---
@@ -45,20 +50,19 @@ TIME_WINDOWS = {
     "1 Year": 365,
 }
 
+GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+
+
+# --- Data helpers ---
 
 def fetch_data() -> pd.DataFrame:
     """Fetch 1 year of daily closing prices for all commodities."""
     end = datetime.today()
     start = end - timedelta(days=365)
     tickers = list(COMMODITIES.values())
-
     raw = yf.download(tickers, start=start, end=end, auto_adjust=True, progress=False)["Close"]
-
-    # Rename columns from ticker to human-readable name
     ticker_to_name = {v: k for k, v in COMMODITIES.items()}
     raw = raw.rename(columns=ticker_to_name)
-
-    # Drop commodities with insufficient data (>50% missing)
     raw = raw.dropna(axis=1, thresh=int(len(raw) * 0.5))
     return raw
 
@@ -66,12 +70,8 @@ def fetch_data() -> pd.DataFrame:
 def compute_returns(prices: pd.DataFrame, start_date: datetime) -> pd.DataFrame:
     """Normalize prices to % return from start_date."""
     subset = prices[prices.index >= pd.Timestamp(start_date)].copy()
-    subset = subset.dropna(axis=1, how="all")
-
-    # Forward-fill minor gaps, then normalize to first valid value
-    subset = subset.ffill().bfill()
-    normalized = (subset / subset.iloc[0] - 1) * 100
-    return normalized
+    subset = subset.dropna(axis=1, how="all").ffill().bfill()
+    return (subset / subset.iloc[0] - 1) * 100
 
 
 def compute_daily_changes(prices: pd.DataFrame, start_date: datetime) -> pd.DataFrame:
@@ -81,15 +81,84 @@ def compute_daily_changes(prices: pd.DataFrame, start_date: datetime) -> pd.Data
     return subset.pct_change() * 100
 
 
-def make_figure(returns: pd.DataFrame, title: str, commodities: list[str]) -> go.Figure:
+# --- News & AI helpers ---
+
+def fetch_headlines(commodity: str, end_date: datetime, lookback_days: int = 5) -> list[dict]:
+    """
+    Fetch top news headlines from GDELT for a commodity in the N days prior to end_date.
+    Returns a list of dicts with 'title', 'domain', and 'date' keys.
+    """
+    start = end_date - timedelta(days=lookback_days)
+    params = {
+        "query": f'"{commodity}"',
+        "startdatetime": start.strftime("%Y%m%d%H%M%S"),
+        "enddatetime": end_date.strftime("%Y%m%d%H%M%S"),
+        "mode": "artlist",
+        "format": "json",
+        "maxrecords": 10,
+        "sort": "hybridrel",
+    }
+    try:
+        resp = requests.get(GDELT_URL, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        articles = data.get("articles", [])
+        return [
+            {
+                "title": a.get("title", "").strip(),
+                "domain": a.get("domain", ""),
+                "date": a.get("seendate", "")[:8],  # YYYYMMDD
+            }
+            for a in articles
+            if a.get("title")
+        ]
+    except Exception as e:
+        return [{"title": f"Error fetching news: {e}", "domain": "", "date": ""}]
+
+
+def summarize_with_claude(commodity: str, click_date: str, headlines: list[dict]) -> str:
+    """Use Claude Haiku to identify the likely event driving a commodity price movement."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return "Set the ANTHROPIC_API_KEY environment variable to enable AI summaries."
+
+    headlines_text = "\n".join(
+        f"- [{h['date']}] {h['title']} ({h['domain']})" for h in headlines
+    )
+    if not headlines_text:
+        return "No headlines found for this commodity and date range."
+
+    client = anthropic.Anthropic(api_key=api_key)
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=300,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"The commodity '{commodity}' had a notable price movement around {click_date}. "
+                    f"Below are the top news headlines from the 5 days prior:\n\n{headlines_text}\n\n"
+                    f"In 2-3 concise sentences, identify the most likely event or factor from these "
+                    f"headlines that caused the price movement. Be specific about the event and its "
+                    f"probable impact on supply or demand."
+                ),
+            }
+        ],
+    )
+    return message.content[0].text
+
+
+# --- Chart builder ---
+
+def make_figure(data: pd.DataFrame, title: str, commodities: list[str], y_label: str = "Return (%)") -> go.Figure:
     fig = go.Figure()
     for name in commodities:
-        if name not in returns.columns:
+        if name not in data.columns:
             continue
         fig.add_trace(
             go.Scatter(
-                x=returns.index,
-                y=returns[name].round(2),
+                x=data.index,
+                y=data[name].round(2),
                 mode="lines",
                 name=name,
                 hovertemplate="%{fullData.name}<br>%{x|%b %d, %Y}<br><b>%{y:+.2f}%</b><extra></extra>",
@@ -99,7 +168,7 @@ def make_figure(returns: pd.DataFrame, title: str, commodities: list[str]) -> go
     fig.update_layout(
         title=title,
         xaxis_title="Date",
-        yaxis_title="Return (%)",
+        yaxis_title=y_label,
         legend=dict(orientation="v", x=1.02, y=1),
         hovermode="x unified",
         template="plotly_dark",
@@ -115,6 +184,15 @@ print(f"Loaded {len(ALL_PRICES.columns)} commodities.")
 
 # --- Dash app ---
 app = Dash(__name__)
+
+_panel_style = {
+    "backgroundColor": "#16213e",
+    "border": "1px solid #2a2a5a",
+    "borderRadius": "8px",
+    "padding": "20px",
+    "marginTop": "20px",
+    "color": "#e0e0e0",
+}
 
 app.layout = html.Div(
     style={"backgroundColor": "#1a1a2e", "minHeight": "100vh", "padding": "20px", "fontFamily": "sans-serif"},
@@ -152,9 +230,22 @@ app.layout = html.Div(
             id="last-updated",
             style={"color": "#555", "textAlign": "center", "marginTop": "12px", "fontSize": "12px"},
         ),
+
+        # --- News Analysis Panel ---
+        html.P(
+            "Click any point on the left chart to analyze news headlines around that date.",
+            style={"color": "#666", "textAlign": "center", "marginTop": "24px", "fontSize": "13px"},
+        ),
+        dcc.Loading(
+            type="circle",
+            color="#7b8cde",
+            children=html.Div(id="news-panel"),
+        ),
     ],
 )
 
+
+# --- Callbacks ---
 
 @app.callback(
     Output("top-10", "figure"),
@@ -175,12 +266,60 @@ def update_charts(days: int):
     fig_top = make_figure(returns, "Top 10 Performers", top10)
 
     daily = compute_daily_changes(ALL_PRICES, start)
-    fig_deriv = make_figure(daily, "Daily Price Change — Top 10 Performers", top10)
-    fig_deriv.update_layout(yaxis_title="Daily Change (%)")
-    fig_deriv.update_traces(hovertemplate="%{fullData.name}<br>%{x|%b %d, %Y}<br><b>%{y:+.2f}%/day</b><extra></extra>")
+    fig_deriv = make_figure(daily, "Daily Price Change — Top 10 Performers", top10, y_label="Daily Change (%)")
+    fig_deriv.update_traces(
+        hovertemplate="%{fullData.name}<br>%{x|%b %d, %Y}<br><b>%{y:+.2f}%/day</b><extra></extra>"
+    )
 
     updated = f"Data as of {datetime.today().strftime('%B %d, %Y')} | {len(returns.columns)} commodities tracked"
     return fig_top, fig_deriv, updated
+
+
+@app.callback(
+    Output("news-panel", "children"),
+    Input("top-10", "clickData"),
+    prevent_initial_call=True,
+)
+def analyze_click(click_data):
+    if not click_data:
+        return no_update
+
+    point = click_data["points"][0]
+    commodity = point["data"]["name"]
+    date_str = point["x"]  # ISO format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS
+    click_date = datetime.fromisoformat(date_str[:10])
+    display_date = click_date.strftime("%B %d, %Y")
+
+    headlines = fetch_headlines(commodity, click_date)
+    summary = summarize_with_claude(commodity, display_date, headlines)
+
+    headline_items = [
+        html.Li(
+            [
+                html.Span(f"[{h['date'][:4]}-{h['date'][4:6]}-{h['date'][6:]}] " if h["date"] else "",
+                          style={"color": "#888", "fontSize": "12px"}),
+                html.Span(h["title"], style={"color": "#c8d0e7"}),
+                html.Span(f"  — {h['domain']}" if h["domain"] else "",
+                          style={"color": "#555", "fontSize": "12px"}),
+            ],
+            style={"marginBottom": "6px"},
+        )
+        for h in headlines
+    ] or [html.Li("No headlines found.", style={"color": "#888"})]
+
+    return html.Div(
+        style=_panel_style,
+        children=[
+            html.H3(
+                f"News Analysis: {commodity} around {display_date}",
+                style={"color": "#7b8cde", "marginTop": 0},
+            ),
+            html.H4("Claude's Summary", style={"color": "#aab4d4", "marginBottom": "8px"}),
+            html.P(summary, style={"color": "#e0e0e0", "lineHeight": "1.6", "marginBottom": "20px"}),
+            html.H4(f"Top Headlines (5 days prior)", style={"color": "#aab4d4", "marginBottom": "8px"}),
+            html.Ul(headline_items, style={"paddingLeft": "20px", "lineHeight": "1.8"}),
+        ],
+    )
 
 
 if __name__ == "__main__":
