@@ -1,6 +1,7 @@
 """
 Commodities Market Dashboard
-Displays top 10 and bottom 10 commodity futures performers over a user-selected time window.
+Left chart: top 10 performers (cumulative % return).
+Right chart: daily price change (derivative) for those same top 10.
 """
 
 import pandas as pd
@@ -73,6 +74,13 @@ def compute_returns(prices: pd.DataFrame, start_date: datetime) -> pd.DataFrame:
     return normalized
 
 
+def compute_daily_changes(prices: pd.DataFrame, start_date: datetime) -> pd.DataFrame:
+    """Day-over-day price change (first difference) as % of previous close."""
+    subset = prices[prices.index >= pd.Timestamp(start_date)].copy()
+    subset = subset.dropna(axis=1, how="all").ffill().bfill()
+    return subset.pct_change() * 100
+
+
 def make_figure(returns: pd.DataFrame, title: str, commodities: list[str]) -> go.Figure:
     fig = go.Figure()
     for name in commodities:
@@ -116,7 +124,7 @@ app.layout = html.Div(
             style={"color": "#e0e0e0", "textAlign": "center", "marginBottom": "4px"},
         ),
         html.P(
-            "Top 10 & Bottom 10 futures performers over the selected period.",
+            "Left: top 10 performers (cumulative return). Right: daily price change for those same commodities.",
             style={"color": "#888", "textAlign": "center", "marginBottom": "20px"},
         ),
         html.Div(
@@ -137,7 +145,7 @@ app.layout = html.Div(
             style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "16px"},
             children=[
                 dcc.Graph(id="top-10", style={"height": "520px"}),
-                dcc.Graph(id="bottom-10", style={"height": "520px"}),
+                dcc.Graph(id="top-10-derivative", style={"height": "520px"}),
             ],
         ),
         html.Div(
@@ -150,7 +158,7 @@ app.layout = html.Div(
 
 @app.callback(
     Output("top-10", "figure"),
-    Output("bottom-10", "figure"),
+    Output("top-10-derivative", "figure"),
     Output("last-updated", "children"),
     Input("time-window", "value"),
 )
@@ -162,15 +170,17 @@ def update_charts(days: int):
         empty = go.Figure()
         return empty, empty, "No data available."
 
-    total_returns = returns.iloc[-1].sort_values(ascending=False)
-    top10 = total_returns.head(10).index.tolist()
-    bottom10 = total_returns.tail(10).sort_values().index.tolist()
+    top10 = returns.iloc[-1].sort_values(ascending=False).head(10).index.tolist()
 
     fig_top = make_figure(returns, "Top 10 Performers", top10)
-    fig_bot = make_figure(returns, "Bottom 10 Performers", bottom10)
+
+    daily = compute_daily_changes(ALL_PRICES, start)
+    fig_deriv = make_figure(daily, "Daily Price Change — Top 10 Performers", top10)
+    fig_deriv.update_layout(yaxis_title="Daily Change (%)")
+    fig_deriv.update_traces(hovertemplate="%{fullData.name}<br>%{x|%b %d, %Y}<br><b>%{y:+.2f}%/day</b><extra></extra>")
 
     updated = f"Data as of {datetime.today().strftime('%B %d, %Y')} | {len(returns.columns)} commodities tracked"
-    return fig_top, fig_bot, updated
+    return fig_top, fig_deriv, updated
 
 
 if __name__ == "__main__":
