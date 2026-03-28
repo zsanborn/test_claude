@@ -12,7 +12,7 @@ from duckduckgo_search import DDGS
 import pandas as pd
 import plotly.graph_objects as go
 import yfinance as yf
-from dash import Dash, Input, Output, dcc, html, no_update
+from dash import Dash, Input, Output, State, dcc, html, no_update
 from datetime import datetime, timedelta
 
 # --- Commodity futures tickers ---
@@ -150,7 +150,7 @@ def summarize_with_claude(commodity: str, click_date: str, headlines: list[dict]
 
 # --- Chart builder ---
 
-def make_figure(data: pd.DataFrame, title: str, commodities: list[str], y_label: str = "Return (%)") -> go.Figure:
+def make_figure(data: pd.DataFrame, title: str, commodities: list[str], y_label: str = "Return (%)", hovermode: str = "x unified") -> go.Figure:
     fig = go.Figure()
     for name in commodities:
         if name not in data.columns:
@@ -171,7 +171,7 @@ def make_figure(data: pd.DataFrame, title: str, commodities: list[str], y_label:
         xaxis_title="Date",
         yaxis_title=y_label,
         legend=dict(orientation="v", x=1.02, y=1),
-        hovermode="x unified",
+        hovermode=hovermode,
         template="plotly_dark",
         margin=dict(l=50, r=180, t=50, b=50),
     )
@@ -264,7 +264,7 @@ def update_charts(days: int):
 
     top10 = returns.iloc[-1].sort_values(ascending=False).head(10).index.tolist()
 
-    fig_top = make_figure(returns, "Top 10 Performers", top10)
+    fig_top = make_figure(returns, "Top 10 Performers", top10, hovermode="closest")
 
     daily = compute_daily_changes(ALL_PRICES, start)
     fig_deriv = make_figure(daily, "Daily Price Change — Top 10 Performers", top10, y_label="Daily Change (%)")
@@ -278,12 +278,14 @@ def update_charts(days: int):
 
 @app.callback(
     Output("news-panel", "children"),
+    Output("top-10", "figure", allow_duplicate=True),
     Input("top-10", "clickData"),
+    State("time-window", "value"),
     prevent_initial_call=True,
 )
-def analyze_click(click_data):
+def analyze_click(click_data, days):
     if not click_data:
-        return no_update
+        return no_update, no_update
 
     point = click_data["points"][0]
     commodity = point.get("customdata") or point.get("data", {}).get("name", "Unknown")
@@ -294,10 +296,25 @@ def analyze_click(click_data):
     headlines = fetch_headlines(commodity, click_date)
     summary = summarize_with_claude(commodity, display_date, headlines)
 
+    # Rebuild top-10 figure with a selection circle at the clicked point
+    start = datetime.today() - timedelta(days=days)
+    returns = compute_returns(ALL_PRICES, start)
+    top10 = returns.iloc[-1].sort_values(ascending=False).head(10).index.tolist()
+    fig_top = make_figure(returns, "Top 10 Performers", top10, hovermode="closest")
+    fig_top.add_trace(go.Scatter(
+        x=[click_date],
+        y=[point["y"]],
+        mode="markers",
+        marker=dict(size=14, color="rgba(0,0,0,0)", line=dict(color="white", width=2.5)),
+        name="Selected",
+        showlegend=False,
+        hoverinfo="skip",
+    ))
+
     headline_items = [
         html.Li(
             [
-                html.Span(f"[{h['date'][:4]}-{h['date'][4:6]}-{h['date'][6:]}] " if h["date"] else "",
+                html.Span(f"[{h['date']}] " if h["date"] else "",
                           style={"color": "#888", "fontSize": "12px"}),
                 html.Span(h["title"], style={"color": "#c8d0e7"}),
                 html.Span(f"  — {h['domain']}" if h["domain"] else "",
@@ -308,7 +325,7 @@ def analyze_click(click_data):
         for h in headlines
     ] or [html.Li("No headlines found.", style={"color": "#888"})]
 
-    return html.Div(
+    news_panel = html.Div(
         style=_panel_style,
         children=[
             html.H3(
@@ -317,10 +334,11 @@ def analyze_click(click_data):
             ),
             html.H4("Claude's Summary", style={"color": "#aab4d4", "marginBottom": "8px"}),
             html.P(summary, style={"color": "#e0e0e0", "lineHeight": "1.6", "marginBottom": "20px"}),
-            html.H4(f"Top Headlines (5 days prior)", style={"color": "#aab4d4", "marginBottom": "8px"}),
+            html.H4("Top Headlines (5 days prior)", style={"color": "#aab4d4", "marginBottom": "8px"}),
             html.Ul(headline_items, style={"paddingLeft": "20px", "lineHeight": "1.8"}),
         ],
     )
+    return news_panel, fig_top
 
 
 if __name__ == "__main__":
